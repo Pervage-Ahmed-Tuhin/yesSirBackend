@@ -65,15 +65,8 @@ router.post('/start-session/:classroomId', async (req, res) => {
         await newSession.save();
         console.log('New session created:', newSession);
 
-        // Set timer to auto-end session after 5 minutes
-        setTimeout(async () => {
-            console.log('Auto-ending session:', sessionId);
-            await AttendanceSession.findOneAndUpdate(
-                { sessionId, isActive: true },
-                { isActive: false, endedAt: new Date() }
-            );
-            console.log('Session auto-ended:', sessionId);
-        }, 300000); // 5 minutes (300 seconds * 1000ms)
+        // Note: Frontend handles session timing
+        // No need for backend setTimeout as frontend manages the 5-minute timer
 
         res.json({
             success: true,
@@ -226,10 +219,24 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         const { classroomId } = req.params;
         const { studentId, studentName, studentEmail } = req.body;
 
+        console.log('Submit attendance request:', { 
+            classroomId, 
+            studentId, 
+            studentName, 
+            hasFile: !!req.file 
+        });
+
         if (!req.file) {
             return res.status(400).json({
                 success: false,
-                message: 'Photo is required'
+                message: 'Photo is required for attendance submission'
+            });
+        }
+
+        if (!studentId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Student ID is required'
             });
         }
 
@@ -240,11 +247,18 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         });
 
         if (!activeSession) {
-            return res.status(400).json({
+            console.log('No active session found for classroom:', classroomId);
+            return res.status(404).json({
                 success: false,
-                message: 'No active attendance session'
+                message: 'No active attendance session found'
             });
         }
+
+        console.log('Active session found:', {
+            sessionId: activeSession.sessionId,
+            startTime: activeSession.startTime,
+            endTime: activeSession.endTime
+        });
 
         // Check if student already submitted today (not just for this session)
         const today = new Date();
@@ -261,23 +275,34 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         });
 
         if (existingAttendance) {
-            return res.status(400).json({
+            console.log('Student already submitted attendance today:', existingAttendance._id);
+            return res.status(409).json({
                 success: false,
-                message: 'You have already submitted attendance today. Only one submission per day is allowed.'
+                message: 'You have already submitted attendance today'
             });
         }
 
         // Upload image to Cloudinary
+        console.log('Uploading photo to Cloudinary...');
         const uploadResult = await new Promise((resolve, reject) => {
             cloudinary.uploader.upload_stream(
                 {
                     folder: 'attendance_photos',
                     public_id: `${studentId}_${Date.now()}`,
-                    resource_type: 'image'
+                    resource_type: 'image',
+                    transformation: [
+                        { width: 800, height: 600, crop: 'limit' },
+                        { quality: 'auto:good' }
+                    ]
                 },
                 (error, result) => {
-                    if (error) reject(error);
-                    else resolve(result);
+                    if (error) {
+                        console.error('Cloudinary upload error:', error);
+                        reject(error);
+                    } else {
+                        console.log('Cloudinary upload successful:', result.secure_url);
+                        resolve(result);
+                    }
                 }
             ).end(req.file.buffer);
         });
@@ -294,6 +319,8 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         });
 
         await attendance.save();
+        
+        console.log('Attendance record saved:', attendance._id);
 
         res.json({
             success: true,
@@ -303,9 +330,20 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
 
     } catch (error) {
         console.error('Submit attendance error:', error);
+        
+        let errorMessage = 'Failed to submit attendance. ';
+        if (error.message && error.message.includes('cloudinary')) {
+            errorMessage += 'Photo upload failed. Please try again.';
+        } else if (error.message && error.message.includes('validation')) {
+            errorMessage += 'Invalid data provided.';
+        } else {
+            errorMessage += 'Please try again.';
+        }
+        
         res.status(500).json({
             success: false,
-            message: 'Failed to submit attendance'
+            message: errorMessage,
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 });
