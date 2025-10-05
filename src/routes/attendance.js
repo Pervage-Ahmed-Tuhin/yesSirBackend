@@ -75,13 +75,17 @@ router.post('/start-session/:classroomId', async (req, res) => {
             durationMinutes
         });
 
+        // Return current server time to help with clock sync
+        const serverNow = new Date();
+
         res.json({
             success: true,
             message: 'Attendance session started',
             sessionId,
             startedAt: startedAt.toISOString(),
             expiresAt: expiresAt.toISOString(),
-            durationMinutes
+            durationMinutes,
+            serverNow: serverNow.toISOString() // For clock drift calculation
         });
 
     } catch (error) {
