@@ -57,6 +57,10 @@ const attendanceSessionSchema = new mongoose.Schema({
     endedAt: {
         type: Date
     },
+    expiresAt: {
+        type: Date,
+        required: true
+    },
     duration: {
         type: Number,
         default: 300 // 5 minutes in seconds

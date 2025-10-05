@@ -13,7 +13,7 @@ const router = express.Router();
 
 // Configure multer for handling multipart/form-data
 const storage = multer.memoryStorage();
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: {
         fileSize: 10 * 1024 * 1024 // 10MB limit
@@ -31,7 +31,7 @@ const upload = multer({
 router.post('/start-session/:classroomId', async (req, res) => {
     try {
         const { classroomId } = req.params;
-        
+
         console.log('Starting attendance session for classroom:', classroomId);
 
         // Check if classroom exists
@@ -49,29 +49,39 @@ router.post('/start-session/:classroomId', async (req, res) => {
             { classroomId, isActive: true },
             { isActive: false, endedAt: new Date() }
         );
-        
+
         console.log('Ended existing sessions:', endedSessions);
 
-        // Create new session
+        // Create new session with absolute expiry time
         const sessionId = uuidv4();
+        const durationMinutes = Number(req.body.duration ?? 5); // default 5 minutes
+        const startedAt = new Date();
+        const expiresAt = new Date(startedAt.getTime() + durationMinutes * 60 * 1000);
+
         const newSession = new AttendanceSession({
             classroomId,
             sessionId,
             isActive: true,
-            startedAt: new Date(),
-            duration: 300 // 5 minutes in seconds
+            startedAt,
+            expiresAt,
+            duration: durationMinutes * 60 // store in seconds for backward compatibility
         });
 
         await newSession.save();
-        console.log('New session created:', newSession);
-
-        // Note: Frontend handles session timing
-        // No need for backend setTimeout as frontend manages the 5-minute timer
+        console.log('New session created:', {
+            sessionId: newSession.sessionId,
+            startedAt: newSession.startedAt.toISOString(),
+            expiresAt: newSession.expiresAt.toISOString(),
+            durationMinutes
+        });
 
         res.json({
             success: true,
             message: 'Attendance session started',
-            sessionId
+            sessionId,
+            startedAt: startedAt.toISOString(),
+            expiresAt: expiresAt.toISOString(),
+            durationMinutes
         });
 
     } catch (error) {
@@ -87,15 +97,15 @@ router.post('/start-session/:classroomId', async (req, res) => {
 router.post('/stop-session/:classroomId', async (req, res) => {
     try {
         const { classroomId } = req.params;
-        
+
         console.log('Attempting to stop session for classroom:', classroomId);
 
         // First check if there's an active session
         const activeSession = await AttendanceSession.findOne({
-            classroomId, 
-            isActive: true 
+            classroomId,
+            isActive: true
         });
-        
+
         console.log('Found active session:', activeSession);
 
         if (!activeSession) {
@@ -103,7 +113,7 @@ router.post('/stop-session/:classroomId', async (req, res) => {
             // Let's check if there are any sessions at all for this classroom
             const allSessions = await AttendanceSession.find({ classroomId });
             console.log('All sessions for this classroom:', allSessions);
-            
+
             // Return success even if no active session - this handles the case where
             // the session already expired or was stopped
             return res.json({
@@ -139,7 +149,7 @@ router.post('/stop-session/:classroomId', async (req, res) => {
 router.get('/session-status/:classroomId', async (req, res) => {
     try {
         const { classroomId } = req.params;
-        
+
         console.log('Checking session status for classroom:', classroomId);
 
         const activeSession = await AttendanceSession.findOne({
@@ -158,17 +168,16 @@ router.get('/session-status/:classroomId', async (req, res) => {
             });
         }
 
-        // Calculate time remaining
+        // Calculate time remaining using absolute expiresAt timestamp
         const now = new Date();
-        const sessionStart = new Date(activeSession.startedAt);
-        const elapsed = Math.floor((now - sessionStart) / 1000);
-        const timeRemaining = Math.max(0, activeSession.duration - elapsed);
+        const expiresAt = new Date(activeSession.expiresAt);
+        const remainingMs = Math.max(0, expiresAt.getTime() - now.getTime());
+        const timeRemaining = Math.ceil(remainingMs / 1000); // Convert to seconds
 
         console.log('Time calculation:', {
             now: now.toISOString(),
-            sessionStart: sessionStart.toISOString(),
-            elapsed,
-            duration: activeSession.duration,
+            expiresAt: expiresAt.toISOString(),
+            remainingMs,
             timeRemaining
         });
 
@@ -184,6 +193,7 @@ router.get('/session-status/:classroomId', async (req, res) => {
             success: true,
             isActive: activeSession.isActive && timeRemaining > 0,
             timeRemaining,
+            expiresAt: expiresAt.toISOString(),
             sessionId: activeSession.sessionId
         };
 
@@ -219,11 +229,11 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         const { classroomId } = req.params;
         const { studentId, studentName, studentEmail } = req.body;
 
-        console.log('Submit attendance request:', { 
-            classroomId, 
-            studentId, 
-            studentName, 
-            hasFile: !!req.file 
+        console.log('Submit attendance request:', {
+            classroomId,
+            studentId,
+            studentName,
+            hasFile: !!req.file
         });
 
         if (!req.file) {
@@ -254,10 +264,31 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
             });
         }
 
+        // Validate session hasn't expired using absolute timestamp
+        const now = new Date();
+        const expiresAt = new Date(activeSession.expiresAt);
+
+        if (now > expiresAt) {
+            console.log('Session expired:', {
+                now: now.toISOString(),
+                expiresAt: expiresAt.toISOString()
+            });
+
+            // Deactivate expired session
+            activeSession.isActive = false;
+            activeSession.endedAt = now;
+            await activeSession.save();
+
+            return res.status(400).json({
+                success: false,
+                message: 'Attendance session has expired'
+            });
+        }
+
         console.log('Active session found:', {
             sessionId: activeSession.sessionId,
-            startTime: activeSession.startTime,
-            endTime: activeSession.endTime
+            expiresAt: expiresAt.toISOString(),
+            timeRemaining: Math.ceil((expiresAt.getTime() - now.getTime()) / 1000)
         });
 
         // Check if student already submitted today (not just for this session)
@@ -319,7 +350,7 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         });
 
         await attendance.save();
-        
+
         console.log('Attendance record saved:', attendance._id);
 
         res.json({
@@ -330,7 +361,7 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
 
     } catch (error) {
         console.error('Submit attendance error:', error);
-        
+
         let errorMessage = 'Failed to submit attendance. ';
         if (error.message && error.message.includes('cloudinary')) {
             errorMessage += 'Photo upload failed. Please try again.';
@@ -339,7 +370,7 @@ router.post('/submit/:classroomId', upload.single('photo'), async (req, res) => 
         } else {
             errorMessage += 'Please try again.';
         }
-        
+
         res.status(500).json({
             success: false,
             message: errorMessage,
@@ -464,7 +495,7 @@ router.post('/generate-excel/:classroomId', async (req, res) => {
 
         // Generate buffer
         const buffer = await workbook.xlsx.writeBuffer();
-        
+
         console.log('Buffer generated, uploading to Cloudinary...');
 
         // Upload to Cloudinary as raw file
@@ -511,7 +542,7 @@ router.post('/cleanup/now', async (req, res) => {
     try {
         console.log('📞 Manual cleanup requested via API');
         await attendanceCleanupService.cleanupNow();
-        
+
         res.json({
             success: true,
             message: 'Manual cleanup completed successfully'
@@ -530,7 +561,7 @@ router.post('/cleanup/now', async (req, res) => {
 router.get('/cleanup/stats', async (req, res) => {
     try {
         const stats = await attendanceCleanupService.getCleanupStats();
-        
+
         if (!stats) {
             return res.status(500).json({
                 success: false,
@@ -565,7 +596,7 @@ router.get('/cleanup/stats', async (req, res) => {
 router.delete('/cleanup-session/:classroomId', async (req, res) => {
     try {
         const { classroomId } = req.params;
-        
+
         console.log('🧹 Manual cleanup requested for classroom:', classroomId);
 
         // Get today's date range to delete only today's data
@@ -594,7 +625,7 @@ router.delete('/cleanup-session/:classroomId', async (req, res) => {
 
         // Get session IDs for today
         const sessionIds = todaySessions.map(session => session.sessionId);
-        
+
         console.log(`Found ${todaySessions.length} session(s) for today:`, sessionIds);
 
         // Delete attendance records for today's sessions
